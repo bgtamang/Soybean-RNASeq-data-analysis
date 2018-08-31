@@ -1,0 +1,268 @@
+
+#####################################################################################
+#################         WGCNA analsis of soybean RNASeq data         ##############
+#####################################################################################
+
+
+#SETUP
+# First, let's load the libraries that we will be using for this analysis. 
+
+source("https://bioconductor.org/biocLite.R")
+biocLite("GO.db")
+biocLite("impute")
+biocLite("preprocessCore")
+
+
+library('WGCNA')
+allowWGCNAThreads()
+
+#Set working directory
+setwd()
+
+#Read file. We are using log2 converted FPKM values of 33801 genes and our 18 experimental conditions.
+
+soyseq <- read.csv("<filename.csv>", sep = ",", header= TRUE, row.names = 1)
+ 
+
+#Transpose the data and convert as.data.frame since further analysis requires genes as columns.
+soyseq.t = as.data.frame(t(soyseq))
+
+
+############################################################################################################
+#Next we cluster the samples (in contrast to clustering genes that will come later) to see if there are any obvious outliers.
+
+sampleTree = hclust(dist(soyseq.t), method = "average")
+
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+sizeGrWindow(12,9)
+
+par(cex = 0.6); par(mar = c(0,4,2,0))
+
+#pdf(file = "Sample Clustering.pdf", width = 12, height = 9)
+plot(sampleTree, main = "Sample clustering of soyseq log2FPKM", sub="", xlab="", cex.lab = 1.5,cex.axis = 1.5, cex.main = 2)
+#dev.off()
+
+
+############################################################################################################
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=30, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(soyseq.t, powerVector = powers, verbose = 5)
+save (sft, file = "Soft thresholding powers.soyseq.Rdata")
+load("Soft thresholding powers.soyseq.Rdata")
+# Plot the results:
+sizeGrWindow(5, 5)
+par(mfrow = c(1,2))
+cex1 = 0.5
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+pdf ("Scale free topology fit index. soyseq.pdf", width = 12, height = 9)
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"))
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=0.5,col="red")
+
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.80,col="red") #h value can also be 0.9.
+dev.off()
+# Mean connectivity as a function of the soft-thresholding power
+#pdf ("Mean connectivity. soyseq.pdf", width = 12, height = 9)
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=0.5,col="red")
+#dev.off()
+
+############################################################################################################
+# We now calculate the adjacencies, using the soft thresholding power 12 since 12 is what the above plots shows is needed as beta value to get scale-free topography:
+softPower = 12;
+adjacency = adjacency(soyseq.t, power = softPower, type = "signed")
+load ("Adjacency matrix SoySeq.Rdata")
+# Turn adjacency into topological overlap
+TOM = TOMsimilarity(adjacency); #TOMType = "signed" will keep sign of adjacency between neighbors.
+dissTOM = 1-TOM
+#save (TOM, file = "TOM.Rdata")
+#save (dissTOM, file = "dissTOM.Rdata")
+#load("TOM.Rdata")
+#load("dissTOM.Rdata")
+
+# Call the hierarchical clustering function
+geneTree = hclust(as.dist(dissTOM), method = "average")
+#save(geneTree, file= "Cluster.dissTOM.Rdata")
+#load("Cluster.dissTOM.Rdata")
+
+# Plot the resulting clustering tree (dendrogram)
+sizeGrWindow(12,9)
+
+#pdf ("Gene clustering on TOM-based dissimilarity.pdf", width = 12, height = 9)
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04)
+#dev.off()
+
+
+#Set minimum module size. This value will lead to different module numbers. Eg. if we select the size 100, the module number will decrease.
+minModuleSize = 30 
+
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM, deepSplit = 2, pamRespectsDendro = FALSE, minClusterSize = minModuleSize)
+save (dynamicMods, file ="dynamicMods.Rdata")
+load ("dynamicMods.Rdata")
+table(dynamicMods) #Shows how many modules were created and how many genes within each module are there.
+
+# Convert numeric lables into colors
+dynamicColors = labels2colors(dynamicMods)
+write.csv (dynamicColors, file = "Dynamic Color.csv")
+table(dynamicColors)
+
+
+# Calculate eigengenes
+MEList = moduleEigengenes(soyseq.t, colors = dynamicColors)
+save(MEList, file = "Module Eigengenes.Rdata")
+load ("Module Eigengenes.Rdata")
+MEs = MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs)
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = "average");
+# Plot the result
+sizeGrWindow(7, 10)
+pdf("Clustering of module eigengenes.pdf", width =20, height = 25)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+dev.off()
+
+
+MEDissThres = 0.25 #Change this and see.Eg. to 0.2 and 0.15. Smaller the number higher the  module number.
+
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col = "red")
+
+# Call an automatic merging function
+merge = mergeCloseModules(soyseq.t, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+save (merge,file = "Module merged.Rdata")
+names (merge)
+ncol(merge$newMEs)
+
+# The merged module colors
+mergedColors = merge$colors
+write.csv (mergedColors, file = "Merged colors dynamic color.30minModule.cutHeight.0.25.csv")
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs
+
+#sizeGrWindow(12, 9)
+#pdf(file = "Soyseq.cluster.dendogram.pdf", width = 9, he = 6)
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+#dev.off()
+
+# Rename to moduleColors
+moduleColors = mergedColors
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1;
+MEs = mergedMEs;
+# Save module colors and labels for use in subsequent parts
+save(MEs, moduleLabels, moduleColors, geneTree, file = "Soyseq-networkConstruction-stepByStep.RData")
+
+#####################################################################################
+################# Visualization ###############
+#####################################################################################
+load("Soyseq-networkConstruction-stepByStep.RData")
+load("Soyseq.WGCNA.File1.Rdata")
+load("dissTOM.Rdata")
+nGenes <- ncol (soyseq.t)
+nSamples <- nrow (soyseq.t)
+
+nSelect = 1000
+set.seed(10)
+select <- sample(nGenes, size = nSelect)
+selectTOM <- dissTOM[select,select]
+selectTree <- hclust(as.dist(selectTOM), method = "average")
+selectColors <- moduleColors[select]
+
+sizeGrWindow(9,9)
+
+pdf("Network heatmap plot.selected genes.pdf", width = 8, height = 10)
+plotDiss = selectTOM^5;
+diag(plotDiss) = NA;
+TOMplot(plotDiss, selectTree, selectColors, main = "Network heatmap plot. selected genes")
+dev.off()
+
+
+MEs = moduleEigengenes(soyseq.t, moduleColors)$eigengenes
+plotEigengeneNetworks(MEs, "", marDendro = c(0,4,1,2), marHeatmap = c(3,4,1,2), cex.lab = 0.8, xLabelsAngle
+                      = 90)
+
+sizeGrWindow(6,6);
+par(cex = 1.0)
+pdf("Eigen dendogram.pdf", width= 9, height =7)
+plotEigengeneNetworks(MEs, "Eigengene dendrogram", marDendro = c(0,4,2,0),
+                      plotHeatmaps = FALSE)
+dev.off()
+
+# Plot the heatmap matrix (note: this plot will overwrite the dendrogram plot)
+par(cex = 1.0)
+
+pdf("Eigen adjacency heatmap.pdf", width = 9, height = 7)
+plotEigengeneNetworks(MEs, "Eigengene adjacency heatmap", marHeatmap = c(3,4,2,2),
+                      plotDendrograms = FALSE, xLabelsAngle = 90)
+dev.off()
+
+
+#####################################################################################
+################# Exporting network ###############
+#####################################################################################
+annot = read.csv(file = "Soyseq.gene.annotation.csv", header = TRUE) #This is a separate file where we have columns, first with gene names and second, third... with annotations or any relevant data on genes.
+names (annot)
+
+# Select module
+modules = "lightsteelblue1" #This is where we select module names (names are colors) on which we want to identify hub genes.
+# Select module genes
+genes <- names(soyseq.t)
+modgenes = genes[inModule]
+inModule = is.finite(match(moduleColors, modules))
+table(inModule)[c("TRUE", "FALSE")] 
+
+# Select the corresponding Topological Overlap
+modTOM = TOM[inModule, inModule]
+save(modTOM, file = "Corresponding TOM of lightsteelblue1 module.Rdata")
+dimnames(modTOM) = list(modgenes, modgenes)
+
+#Selecting top 30 genes. 
+nTop = 30;
+IMConn = softConnectivity(soyseq.t[, modgenes]);
+top = (rank(-IMConn) <= nTop)
+
+#I found that during exporting results, WGCNA exports wrong gene names i.e. instead of exporting top 30 genes, it exports the first 30 genes from gene list. To address this bug, I wrote the below three extra lines of code that will correctly export the top selected genes.
+top.genes.logical = cbind(modgenes,top)
+top.genes.sort = as.matrix (top.genes.logical[order(-top, modgenes)])
+modGenes = annot$TAIR[match(top.genes.sort, annot$SoyID)]
+
+# Export the network into edge and node list files Cytoscape can read
+cyt = exportNetworkToCytoscape(modTOM[top,top],
+                               edgeFile = paste("CytoscapeInput-edges-", paste(modules, collapse="-"), ".txt", sep=""),
+                               nodeFile = paste("CytoscapeInput-nodes-", paste(modules, collapse="-"), ".txt", sep=""),
+                               weighted = TRUE,
+                               threshold = 0.02,
+                               nodeNames = top.genes.sort,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule])
+
+#save (cyt,file = "Cytoscape file of lightsteelblue1 module with edge and node.30 genes.Rdata")
+
+edge <- cyt$edgeData
+node <- cyt$nodeData
+
+#Plotting the histogram to see the distribution of weight of each connection.
+#pdf ("Histogram for lightsteelblue1.30 genes.pdf")
+hist(edge$weight, freq = TRUE, col = "red", border = "black", xlim = c(0,0.6), xlab = "Weight of Edge", main = "30 top genes for lightsteelblue1 module")
+#dev.off()
+
+
+#The above cyt function will create two files, edge file and node file. Edge file can be imported to CYTOSCAPE for visualization.
+
+################################         THE END          ##############################################
